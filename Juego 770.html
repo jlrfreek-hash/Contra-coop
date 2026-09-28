@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Contra Co-op 2D</title>
+  <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+  <style>
+    * { box-sizing: border-box; touch-action: none; user-select: none; margin: 0; padding: 0; }
+    body { background: #0f0f1d; color: #fff; font-family: sans-serif; overflow: hidden; display: flex; justify-content: center; align-items: center; height: 100vh; }
+    
+    #game-container { position: relative; width: 100vw; height: 100vh; max-width: 800px; max-height: 450px; display: flex; justify-content: center; align-items: center; }
+    canvas { background: #181828; border: 2px solid #333; width: 100%; height: 100%; image-rendering: pixelated; }
+    
+    /* Overlay de conexión (Lobby) */
+    #lobby { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(15, 15, 29, 0.95); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 12px; z-index: 10; }
+    .card { background: #22223b; padding: 20px; border-radius: 12px; text-align: center; box-shadow: 0 4px 15px rgba(0,0,0,0.5); width: 85%; max-width: 320px; }
+    input, button { padding: 10px 15px; font-size: 16px; border-radius: 6px; border: none; font-weight: bold; width: 100%; margin-top: 8px; }
+    input { background: #0f0f1d; color: #fff; border: 1px solid #4a4e69; text-align: center; text-transform: uppercase; }
+    button { background: #ff4757; color: #fff; cursor: pointer; }
+    button:active { background: #ff6b81; }
+    .btn-secondary { background: #2ed573; }
+    #status { font-size: 14px; color: #eccc68; margin-top: 10px; }
+
+    /* Controles Táctiles para Móvil */
+    #controls { position: absolute; bottom: 10px; left: 0; width: 100%; display: flex; justify-content: space-between; padding: 0 15px; z-index: 5; pointer-events: none; }
+    .btn-group { display: flex; gap: 10px; pointer-events: auto; }
+    .btn { width: 52px; height: 52px; background: rgba(255,255,255,0.15); border: 2px solid rgba(255,255,255,0.3); border-radius: 50%; display: flex; justify-content: center; align-items: center; font-size: 18px; color: white; font-weight: bold; }
+    .btn:active { background: rgba(255,255,255,0.4); }
+    .btn-act { background: rgba(255, 71, 87, 0.3); border-color: #ff4757; }
+    .btn-grenade { background: rgba(255, 165, 2, 0.3); border-color: #ffa502; }
+  </style>
+</head>
+<body>
+
+<div id="game-container">
+  <canvas id="canvas" width="800" height="450"></canvas>
+
+  <!-- Lobby de Conexión -->
+  <div id="lobby">
+    <div class="card">
+      <h2>CONTRA CO-OP 2D</h2>
+      <button onclick="createRoom()">Crear Sala (P1)</button>
+      <div style="margin: 10px 0; font-size: 12px; color: #888;">— Ó —</div>
+      <input type="text" id="join-id" placeholder="CÓDIGO DE SALA" maxlength="5">
+      <button class="btn-secondary" onclick="joinRoom()">Unirse (P2)</button>
+      <div id="status">Cargando conexión...</div>
+    </div>
+  </div>
+
+  <!-- Gamepad Táctil Móvil -->
+  <div id="controls">
+    <div class="btn-group">
+      <div class="btn" id="btn-left">◄</div>
+      <div class="btn" id="btn-right">►</div>
+    </div>
+    <div class="btn-group">
+      <div class="btn btn-act" id="btn-jump">▲</div>
+      <div class="btn btn-act" id="btn-shoot">🔫</div>
+      <div class="btn btn-grenade" id="btn-grenade">💣</div>
+    </div>
+  </div>
+</div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const lobby = document.getElementById('lobby');
+const statusText = document.getElementById('status');
+
+// --- RED Y MULTIJUGADOR (PeerJS) ---
+let peer, conn;
+let isHost = false;
+let myRole = null; // 'p1' o 'p2'
+
+// Genera un ID corto de 4 caracteres
+const myId = Math.random().toString(36).substring(2, 6);
+peer = new Peer(myId);
+
+peer.on('open', id => {
+  statusText.innerText = `Listo. Tu ID es: ${id.toUpperCase()}`;
+});
+
+peer.on('connection', connection => {
+  conn = connection;
+  isHost = true;
+  myRole = 'p1';
+  setupNetwork();
+});
+
+function createRoom() {
+  if (!peer.id) return;
+  statusText.innerText = `Esperando al P2... Código: ${peer.id.toUpperCase()}`;
+}
+
+function joinRoom() {
+  const targetId = document.getElementById('join-id').value.trim().toLowerCase();
+  if (!targetId) return;
+  conn = peer.connect(targetId);
+  isHost = false;
+  myRole = 'p2';
+  setupNetwork();
+}
+
+function setupNetwork() {
+  conn.on('open', () => {
+    lobby.style.display = 'none';
+    requestAnimationFrame(gameLoop);
+  });
+
+  conn.on('data', data => {
+    if (isHost) {
+      // El Host recibe los controles del Cliente (P2)
+      if (data.type === 'INPUT') inputs.p2 = data.inputs;
+    } else {
+      // El Cliente recibe el estado del mundo desde el Host
+      if (data.type === 'STATE') gameState = data.state;
+    }
+  });
+}
+
+// --- ESTADO DEL JUEGO Y FÍSICAS ---
+const inputs = {
+  p1: { left: false, right: false, jump: false, shoot: false, grenade: false },
+  p2: { left: false, right: false, jump: false, shoot: false, grenade: false }
+};
+
+let gameState = {
+  p1: { x: 100, y: 300, vx: 0, vy: 0, facing: 1, hp: 100, grounded: false, cdShoot: 0, cdGrenade: 0 },
+  p2: { x: 140, y: 300, vx: 0, vy: 0, facing: 1, hp: 100, grounded: false, cdShoot: 0, cdGrenade: 0 },
+  bullets: [],
+  grenades: [],
+  particles: [],
+  enemies: [
+    { x: 500, y: 100, vx: 1.5, hp: 30 },
+    { x: 700, y: 300, vx: -1.5, hp: 30 }
+  ],
+  score: 0
+};
+
+const platforms = [
+  { x: 0, y: 400, w: 800, h: 50 },     // Suelo principal
+  { x: 150, y: 300, w: 180, h: 15 },   // Plataforma izquierda
+  { x: 470, y: 300, w: 180, h: 15 },   // Plataforma derecha
+  { x: 310, y: 200, w: 180, h: 15 }    // Plataforma superior central
+];
+
+const GRAVITY = 0.5;
+
+// --- CONTROLES (TÁCTIL Y TECLADO) ---
+const myInputs = { left: false, right: false, jump: false, shoot: false, grenade: false };
+
+function bindTouch(elementId, key) {
+  const el = document.getElementById(elementId);
+  const start = (e) => { e.preventDefault(); myInputs[key] = true; };
+  const end = (e) => { e.preventDefault(); myInputs[key] = false; };
+  el.addEventListener('touchstart', start);
+  el.addEventListener('touchend', end);
+  el.addEventListener('mousedown', start);
+  el.addEventListener('mouseup', end);
+}
+
+bindTouch('btn-left', 'left');
+bindTouch('btn-right', 'right');
+bindTouch('btn-jump', 'jump');
+bindTouch('btn-shoot', 'shoot');
+bindTouch('btn-grenade', 'grenade');
+
+window.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') myInputs.left = true;
+  if (e.key === 'ArrowRight' || e.key === 'd') myInputs.right = true;
+  if (e.key === 'ArrowUp' || e.key === 'w' || e.key === ' ') myInputs.jump = true;
+  if (e.key === 'j' || e.key === 'z') myInputs.shoot = true;
+  if (e.key === 'k' || e.key === 'x') myInputs.grenade = true;
+});
+
+window.addEventListener('keyup', e => {
+  if (e.key === 'ArrowLeft' || e.key === 'a') myInputs.left = false;
+  if (e.key === 'ArrowRight' || e.key === 'd') myInputs.right = false;
+  if (e.key === 'ArrowUp' || e.key === 'w' || e.key === ' ') myInputs.jump = false;
+  if (e.key === 'j' || e.key === 'z') myInputs.shoot = false;
+  if (e.key === 'k' || e.key === 'x') myInputs.grenade = false;
+});
+
+// --- MOTOR LÓGICO DEL HOST ---
+function updatePlayer(p, input) {
+  if (p.hp <= 0) return;
+
+  // Movimiento Horizontal
+  if (input.left) { p.vx = -3.5; p.facing = -1; }
+  else if (input.right) { p.vx = 3.5; p.facing = 1; }
+  else { p.vx = 0; }
+
+  // Salto
+  if (input.jump && p.grounded) {
+    p.vy = -10;
+    p.grounded = false;
+  }
+
+  // Aplicar Gravedad y Movimiento
+  p.vy += GRAVITY;
+  p.x += p.vx;
+  p.y += p.vy;
+
+  // Colisión con Plataformas
+  p.grounded = false;
+  platforms.forEach(plat => {
+    if (p.x + 20 > plat.x && p.x < plat.x + plat.w &&
+        p.y + 35 >= plat.y && p.y + 35 <= plat.y + 15 && p.vy >= 0) {
+      p.y = plat.y - 35;
+      p.vy = 0;
+      p.grounded = true;
+    }
+  });
+
+  // Limitar bordes
+  p.x = Math.max(0, Math.min(canvas.width - 20, p.x));
+
+  // Disparos
+  if (p.cdShoot > 0) p.cdShoot--;
+  if (input.shoot && p.cdShoot === 0) {
+    gameState.bullets.push({
+      x: p.facing === 1 ? p.x + 20 : p.x,
+      y: p.y + 12,
+      vx: p.facing * 10
+    });
+    p.cdShoot = 12; // Cooldown de disparo
+  }
+
+  // Granadas
+  if (p.cdGrenade > 0) p.cdGrenade--;
+  if (input.grenade && p.cdGrenade === 0) {
+    gameState.grenades.push({
+      x: p.x + 10,
+      y: p.y,
+      vx: p.facing * 6,
+      vy: -7,
+      timer: 50
+    });
+    p.cdGrenade = 60; // Cooldown de granada
+  }
+}
+
+function updateGameHost() {
+  // Asignar inputs locales al jugador correspondiente
+  inputs[myRole] = myInputs;
+
+  updatePlayer(gameState.p1, inputs.p1);
+  updatePlayer(gameState.p2, inputs.p2);
+
+  // Actualizar Balas
+  gameState.bullets.forEach((b, i) => {
+    b.x += b.vx;
+    // Colisión de bala con enemigos
+    gameState.enemies.forEach(e => {
+      if (b.x > e.x && b.x < e.x + 25 && b.y > e.y && b.y < e.y + 35) {
+        e.hp -= 10;
+        b.remove = true;
+      }
+    });
+  });
+  gameState.bullets = gameState.bullets.filter(b => !b.remove && b.x > 0 && b.x < canvas.width);
+
+  // Actualizar Granadas (Parábola y Explosión)
+  gameState.grenades.forEach(g => {
+    g.vy += GRAVITY * 0.8;
+    g.x += g.vx;
+    g.y += g.vy;
+    g.timer--;
+
+    // Rebote básico en el suelo
+    platforms.forEach(plat => {
+      if (g.x > plat.x && g.x < plat.x + plat.w && g.y >= plat.y - 8 && g.vy > 0) {
+        g.y = plat.y - 8;
+        g.vy = -g.vy * 0.4;
+        g.vx *= 0.6;
+      }
+    });
+
+    // Detonar Granada
+    if (g.timer <= 0) {
+      g.explode = true;
+      // Generar Partículas de Explosión
+      for (let i = 0; i < 15; i++) {
+        gameState.particles.push({
+          x: g.x, y: g.y,
+          vx: (Math.random() - 0.5) * 8,
+          vy: (Math.random() - 0.5) * 8,
+          life: 20
+        });
+      }
+      // Daño de Área (AOE)
+      gameState.enemies.forEach(e => {
+        let dist = Math.hypot(e.x + 12 - g.x, e.y + 17 - g.y);
+        if (dist < 70) e.hp -= 40;
+      });
+    }
+  });
+  gameState.grenades = gameState.grenades.filter(g => !g.explode);
+
+  // Actualizar Partículas
+  gameState.particles.forEach(p => { p.x += p.vx; p.y += p.vy; p.life--; });
+  gameState.particles = gameState.particles.filter(p => p.life > 0);
+
+  // Actualizar Enemigos
+  gameState.enemies.forEach(e => {
+    e.x += e.vx;
+    if (e.x <= 0 || e.x >= canvas.width - 25) e.vx *= -1;
+
+    // Daño al tocar jugadores
+    [gameState.p1, gameState.p2].forEach(p => {
+      if (p.hp > 0 && Math.hypot(p.x - e.x, p.y - e.y) < 25) p.hp -= 0.5;
+    });
+  });
+
+  // Reaparición de Enemigos
+  gameState.enemies.forEach(e => {
+    if (e.hp <= 0) {
+      gameState.score += 100;
+      e.x = Math.random() > 0.5 ? 50 : 700;
+      e.y = 100;
+      e.hp = 30;
+    }
+  });
+
+  // Enviar estado actualizado al Cliente
+  if (conn && conn.open) {
+    conn.send({ type: 'STATE', state: gameState });
+  }
+}
+
+// --- RENDERIZADO (AMBOS TELÉFONOS) ---
+function render() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Dibuja Plataformas
+  ctx.fillStyle = '#4a4e69';
+  platforms.forEach(p => ctx.fillRect(p.x, p.y, p.w, p.h));
+
+  // Dibuja Jugadores (P1 Azul, P2 Verde)
+  drawPlayer(gameState.p1, '#3742fa', 'P1');
+  drawPlayer(gameState.p2, '#2ed573', 'P2');
+
+  // Dibuja Balas (Amarillo)
+  ctx.fillStyle = '#f1c40f';
+  gameState.bullets.forEach(b => ctx.fillRect(b.x, b.y, 6, 4));
+
+  // Dibuja Granadas (Naranja)
+  ctx.fillStyle = '#e67e22';
+  gameState.grenades.forEach(g => {
+    ctx.beginPath();
+    ctx.arc(g.x, g.y, 5, 0, Math.PI * 2);
+    ctx.fill();
+  });
+
+  // Dibuja Partículas de Explosión (Rojo/Naranja)
+  gameState.particles.forEach(p => {
+    ctx.fillStyle = p.life % 2 === 0 ? '#ff4757' : '#ffa502';
+    ctx.fillRect(p.x, p.y, 4, 4);
+  });
+
+  // Dibuja Enemigos (Rojo)
+  gameState.enemies.forEach(e => {
+    ctx.fillStyle = '#ff4757';
+    ctx.fillRect(e.x, e.y, 25, 35);
+    // Barra de vida del enemigo
+    ctx.fillStyle = '#222';
+    ctx.fillRect(e.x, e.y - 8, 25, 4);
+    ctx.fillStyle = '#2ed573';
+    ctx.fillRect(e.x, e.y - 8, (e.hp / 30) * 25, 4);
+  });
+
+  // UI (Puntuación)
+  ctx.fillStyle = '#fff';
+  ctx.font = 'bold 16px monospace';
+  ctx.fillText(`SCORE: ${gameState.score}`, 15, 25);
+}
+
+function drawPlayer(p, color, label) {
+  if (p.hp <= 0) return;
+  // Cuerpo del Jugador
+  ctx.fillStyle = color;
+  ctx.fillRect(p.x, p.y, 20, 35);
+  
+  // Ojo/Dirección
+  ctx.fillStyle = '#fff';
+  let eyeX = p.facing === 1 ? p.x + 12 : p.x + 2;
+  ctx.fillRect(eyeX, p.y + 6, 6, 6);
+
+  // Barra de Vida
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(p.x - 5, p.y - 12, 30, 5);
+  ctx.fillStyle = color;
+  ctx.fillRect(p.x - 5, p.y - 12, (p.hp / 100) * 30, 5);
+  
+  // Etiqueta P1 / P2
+  ctx.fillStyle = '#fff';
+  ctx.font = '10px monospace';
+  ctx.fillText(label, p.x + 3, p.y - 15);
+}
+
+// --- BUCLE PRINCIPAL DEL JUEGO ---
+function gameLoop() {
+  if (isHost) {
+    updateGameHost();
+  } else {
+    // Si es Cliente, envía sus inputs al Host
+    if (conn && conn.open) {
+      conn.send({ type: 'INPUT', inputs: myInputs });
+    }
+  }
+
+  render();
+  requestAnimationFrame(gameLoop);
+}
+</script>
+</body>
+</html>
